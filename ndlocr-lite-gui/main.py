@@ -200,7 +200,7 @@ class ImageSelector:
                 ft.ElevatedButton(TRANSLATIONS["common_cancel"][self.langcode], on_click=self.close_zoom_page)
             ]
         )
-        self.resulttext=ft.Text(value="",selectable=True,color=ft.Colors.BLACK)
+        self.resulttext=ft.Text(value="",selectable=True)
         
         self.crop_image=ft.Image(src=self.image_src, width=300, height=300,fit=ft.ImageFit.CONTAIN)
         crop_image_col = ft.Column(
@@ -505,9 +505,9 @@ class CaptureTool:
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
-        self.resulttext = ft.Text(value="", selectable=True, color=ft.Colors.BLACK)
-        self.resultsmessage=ft.Text(value="", selectable=True, color=ft.Colors.BLACK)
-        self.llmstatus_text = ft.Text(value="", selectable=True, color=ft.Colors.BLACK)
+        self.resulttext = ft.Text(value="", selectable=True)
+        self.resultsmessage=ft.Text(value="", selectable=True)
+        self.llmstatus_text = ft.Text(value="", selectable=True)
         self.result_crop_image = ft.Image(src="", width=300, height=300, fit=ft.ImageFit.CONTAIN)
         
         self.crop_image_int = ft.InteractiveViewer(
@@ -1213,7 +1213,7 @@ def main(page: ft.Page):
                         elif ext == "pdf":
                             all_files_to_process.append((full_path, "pdf"))
                             # ファイル名(拡張子込み)の出現回数をカウント
-                        pdf_filename_counter[filename] += 1
+                            pdf_filename_counter[filename] += 1
 
                 # --- 3. 収集したファイルを順次処理 ---
                 # パス順にソートして処理（見た目の順序を保証）
@@ -1222,10 +1222,8 @@ def main(page: ft.Page):
                 for inputpath, filetype in all_files_to_process:
                     if filetype == "image":
                         inputpathlist.append(inputpath)
-                    
                     elif filetype == "pdf":
                         filename = os.path.basename(inputpath)
-                        
                         # --- 重複判定ロジック ---
                         if pdf_filename_counter[filename] > 1:
                             # 重複がある場合: 相対パスを - でつなげたものを識別子にする

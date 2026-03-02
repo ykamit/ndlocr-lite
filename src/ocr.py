@@ -23,7 +23,7 @@ class RecogLine:
         self.idx   = idx
         self.pred_char_cnt = pred_char_cnt
         self.pred_str = pred_str
-    def __lt__(self, other):  
+    def __lt__(self, other):
         return self.idx < other.idx
 
 def process_cascade(alllineobj,recognizer30,recognizer50,recognizer100,is_cascade=True):
@@ -113,11 +113,11 @@ def inference_on_detector(args,inputname:str,npimage:np.ndarray,outputpath:str,i
         drawimage = npimage.copy()
         pil_image =detector.draw_detections(drawimage, detections=detections)
         os.makedirs(outputpath,exist_ok=True)
-        output_path = os.path.join(outputpath,f"viz_{Path(inputname).name}")
-        if output_path.split(".")[-1]=="jp2":
-            output_path=output_path.split(".")[:-4]+".jpg"
-        print(f"[INFO] Saving result on {output_path}")
-        pil_image.save(output_path)
+        output_filepath = os.path.join(outputpath,f"viz_{Path(inputname).name}")
+        if output_filepath.split(".")[-1]=="jp2":
+            output_filepath=output_filepath[:-4]+".jpg"
+        print(f"[INFO] Saving result on {output_filepath}")
+        pil_image.save(output_filepath)
     return detections,classeslist
 
 def process_detector(detector,inputname:str,npimage:np.ndarray,outputpath:str,issaveimg:bool=True):
@@ -127,11 +127,11 @@ def process_detector(detector,inputname:str,npimage:np.ndarray,outputpath:str,is
         drawimage = npimage.copy()
         pil_image =detector.draw_detections(drawimage, detections=detections)
         os.makedirs(outputpath,exist_ok=True)
-        output_path = os.path.join(outputpath,f"viz_{Path(inputname).name}")
-        if output_path.split(".")[-1]=="jp2":
-            output_path=output_path.split(".")[:-4]+".jpg"
-        print(f"[INFO] Saving result on {output_path}")
-        pil_image.save(output_path)
+        output_filepath = os.path.join(outputpath,f"viz_{Path(inputname).name}")
+        if output_filepath.split(".")[-1]=="jp2":
+            output_filepath=output_filepath[:-4]+".jpg"
+        print(f"[INFO] Saving result on {output_filepath}")
+        pil_image.save(output_filepath)
     return detections,classeslist
 
 def process(args):
@@ -254,9 +254,10 @@ def process(args):
         allxmlstr+="</OCRDATASET>"
         if alllinecnt>0 and tatelinecnt/alllinecnt>0.5:
             alltextlist=alltextlist[::-1]
-        with open(os.path.join(args.output,os.path.basename(inputpath).split(".")[0]+".xml"),"w",encoding="utf-8") as wf:
+        output_stem = os.path.splitext(os.path.basename(inputpath))[0]
+        with open(os.path.join(args.output,output_stem+".xml"),"w",encoding="utf-8") as wf:
             wf.write(allxmlstr)
-        with open(os.path.join(args.output,os.path.basename(inputpath).split(".")[0]+".json"),"w",encoding="utf-8") as wf:
+        with open(os.path.join(args.output,output_stem+".json"),"w",encoding="utf-8") as wf:
             alljsonobj={
                 "contents":[resjsonarray],
                 "imginfo": {
@@ -268,7 +269,7 @@ def process(args):
             }
             alljsonstr=json.dumps(alljsonobj,ensure_ascii=False,indent=2)
             wf.write(alljsonstr)
-        with open(os.path.join(args.output,os.path.basename(inputpath).split(".")[0]+".txt"),"w",encoding="utf-8") as wtf:
+        with open(os.path.join(args.output,output_stem+".txt"),"w",encoding="utf-8") as wtf:
             wtf.write("\n".join(alltextlist))
         print("Total calculation time (Detection + Recognition):",time.time()-start)
 
