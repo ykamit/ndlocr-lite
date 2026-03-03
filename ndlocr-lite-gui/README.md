@@ -56,7 +56,7 @@ flet build macos
 
 ### Linuxの場合
 ```
-#(ndlkotenocr-lite-guiと同階層で実行する)
+#(ndlocr-lite-guiと同階層で実行する)
 python3 -m venv ocrenv
 source ./ocrenv/bin/activate
 pip install flet==0.27.6
