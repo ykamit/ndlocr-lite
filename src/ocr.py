@@ -249,7 +249,29 @@ def process(args):
         resultlinesall = process_cascade(
             alllineobj, recognizer30, recognizer50, recognizer100, is_cascade=True
         )
-        alltextlist.append("\n".join(resultlinesall))
+        if getattr(args, 'paragraph_mode', False):
+            # TEXTBLOCK単位で行を結合し、ブロック間を空行で区切る
+            all_lines = root.findall(".//LINE")
+            line_to_idx = {id(el): i for i, el in enumerate(all_lines)}
+            page = root.find("PAGE")
+            paragraphs = []
+            for elem in page:
+                tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+                if tag == 'TEXTBLOCK':
+                    lines_in_block = []
+                    for line_elem in elem.findall(".//LINE"):
+                        line_idx = line_to_idx.get(id(line_elem))
+                        if line_idx is not None and line_idx < len(resultlinesall):
+                            lines_in_block.append(resultlinesall[line_idx])
+                    if lines_in_block:
+                        paragraphs.append("".join(lines_in_block))
+                elif tag == 'LINE':
+                    line_idx = line_to_idx.get(id(elem))
+                    if line_idx is not None and line_idx < len(resultlinesall):
+                        paragraphs.append(resultlinesall[line_idx])
+            alltextlist.append("\n\n".join(paragraphs))
+        else:
+            alltextlist.append("\n".join(resultlinesall))
         for idx,lineobj in enumerate(root.findall(".//LINE")):
             lineobj.set("STRING",resultlinesall[idx])
             xmin=int(lineobj.get("X"))
@@ -307,6 +329,7 @@ def main():
     parser.add_argument("--rec-weights", type=str, required=False, help="Path to parseq-tiny onnx file", default=str(base_dir / "model" / "parseq-ndl-16x768-100-tiny-165epoch-tegaki2.onnx"))
     parser.add_argument("--rec-classes", type=str, required=False, help="Path to list of class in yaml file", default=str(base_dir / "config" / "NDLmoji.yaml"))
     parser.add_argument("--device", type=str, required=False, help="Device use (cpu or cuda)", choices=["cpu", "cuda"], default="cpu")
+    parser.add_argument("--paragraph-mode", type=bool, required=False, help="Merge lines within the same text block into paragraphs", default=False)
     args = parser.parse_args()
     process(args)
 
