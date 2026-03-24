@@ -403,10 +403,6 @@ def convert_to_markdown(pages, running_headers, chapter_pages, note_page_indices
             out.append("tags:")
             for tag in meta["tags"]:
                 out.append(f"  - {tag}")
-        if meta.get("keywords"):
-            out.append("keywords:")
-            for kw in meta["keywords"]:
-                out.append(f"  - \"{kw}\"")
         out.append("---")
         out.append("")
 
@@ -532,7 +528,6 @@ def main():
     parser.add_argument("--publisher", type=str, help="出版社")
     parser.add_argument("--isbn", type=str, help="ISBN")
     parser.add_argument("--tags", type=str, nargs="*", help="タグ（複数指定可）")
-    parser.add_argument("--keywords", type=str, nargs="*", help="キーワード（複数指定可）")
     parser.add_argument("--type", type=str, default="book", help="資料種別 (book, article, etc.)")
     parser.add_argument("--no-frontmatter", action="store_true", help="YAML frontmatter を出力しない")
 
@@ -596,7 +591,6 @@ def main():
         "isbn": args.isbn,
         "type": args.type,
         "tags": args.tags,
-        "keywords": args.keywords,
     }
     md = convert_to_markdown(
         pages, running_headers, chapter_pages, note_indices,
