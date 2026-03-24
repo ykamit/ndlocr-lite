@@ -297,6 +297,20 @@ def detect_note_pages(pages):
     return note_indices
 
 
+def detect_biblio_pages(pages):
+    """参考文献ページを自動検出。『書名』パターンの密度で判定"""
+    biblio_indices = set()
+    for p in pages:
+        all_text = "".join(para.text for para in p.paragraphs)
+        if not all_text:
+            continue
+        # 『』の出現回数が多いページは参考文献
+        bracket_count = all_text.count('『')
+        if bracket_count >= 5 and bracket_count / (len(all_text) / 100) >= 1.0:
+            biblio_indices.add(p.page_index)
+    return biblio_indices
+
+
 def is_section_heading(para):
     """セクション見出しかどうか判定"""
     if not para.is_heading:
@@ -306,12 +320,19 @@ def is_section_heading(para):
     return True
 
 # ---------------------------------------------------------------------------
-# 注釈エントリ分割
+# 注釈・参考文献エントリ分割
 # ---------------------------------------------------------------------------
+
+# 参考文献エントリの区切りパターン: 年。の後に新しいエントリが始まる
+BIBLIO_SPLIT = re.compile(
+    r'([年年])([。\.、,])(?='
+    r'[^\s\d）\)]'  # 年。/年、の後に文字が続く（次のエントリの著者名）
+    r')'
+)
+
 
 def split_note_entries(paragraphs):
     """注釈ページの段落群を注釈エントリ単位に分割"""
-    # まず全LINEを取り出す
     raw_lines = []
     for para in paragraphs:
         for line in para.lines:
@@ -331,11 +352,31 @@ def split_note_entries(paragraphs):
     entries.append(current)
     return entries
 
+
+def split_biblio_entries(paragraphs):
+    """参考文献ページの段落群を文献エントリ単位に分割"""
+    # まず全LINEを結合
+    raw_lines = []
+    for para in paragraphs:
+        for line in para.lines:
+            raw_lines.append(line.text)
+
+    if not raw_lines:
+        return []
+
+    full_text = "".join(raw_lines)
+
+    # 「年。」の後で分割（年。は残す）
+    parts = BIBLIO_SPLIT.sub(r'\1\2\n', full_text)
+    entries = [e.strip() for e in parts.split('\n') if e.strip()]
+    return entries
+
 # ---------------------------------------------------------------------------
 # Markdown変換
 # ---------------------------------------------------------------------------
 
 def convert_to_markdown(pages, running_headers, chapter_pages, note_page_indices,
+                        biblio_page_indices=None,
                         title=None, author=None, no_frontmatter=False):
     """PageDataリストからMarkdown文字列を生成"""
     out = []
@@ -388,6 +429,18 @@ def convert_to_markdown(pages, running_headers, chapter_pages, note_page_indices
             out.append("---")
             out.append("")
             prev_was_notes = False
+
+        # === 参考文献ページ ===
+        if biblio_page_indices and pi in biblio_page_indices:
+            if carry:
+                out.append(carry)
+                out.append("")
+                carry = ""
+            entries = split_biblio_entries(filtered_paras)
+            for entry in entries:
+                out.append(entry)
+                out.append("")
+            continue
 
         # === 章タイトルページ ===
         if pi in chapter_indices:
@@ -500,16 +553,19 @@ def main():
     running_headers = detect_running_headers(pages)
     chapter_pages = detect_chapter_pages(pages)
     note_indices = detect_note_pages(pages)
+    biblio_indices = detect_biblio_pages(pages)
 
     print(f"[INFO] ランニングヘッダ: {len(running_headers)}件検出")
     print(f"[INFO] 章タイトル: {len(chapter_pages)}件検出")
     for idx, title in chapter_pages:
         print(f"  p{idx+1:03d}: {title[:40]}")
     print(f"[INFO] 注釈ページ: {len(note_indices)}件検出")
+    print(f"[INFO] 参考文献ページ: {len(biblio_indices)}件検出")
 
     # 4. Markdown変換
     md = convert_to_markdown(
         pages, running_headers, chapter_pages, note_indices,
+        biblio_page_indices=biblio_indices,
         title=args.title, author=args.author,
         no_frontmatter=args.no_frontmatter,
     )
