@@ -310,15 +310,54 @@ def detect_chapter_pages(pages):
 
 
 def detect_toc_pages(pages):
-    """目次ページを自動検出"""
+    """目次ページを自動検出（マルチページ対応）"""
     toc_indices = set()
-    toc_keywords = {"目次", "もくじ", "CONTENTS", "Contents"}
+    toc_keywords_exact = {"目次", "もくじ", "CONTENTS", "Contents", "目　次"}
+    toc_keywords_partial = {"目次", "もくじ", "CONTENTS", "Contents"}
+
+    # 1. キーワードで目次開始ページを検出
+    toc_start = None
     for p in pages:
         for para in p.paragraphs:
-            if para.text.strip() in toc_keywords:
+            stripped = para.text.strip()
+            # 完全一致 or 部分一致（短い段落内）
+            if stripped in toc_keywords_exact or (
+                len(stripped) <= 10 and any(kw in stripped for kw in toc_keywords_partial)
+            ):
                 toc_indices.add(p.page_index)
+                toc_start = p.page_index
                 break
+
+    # 2. 目次開始ページの直後の連続ページも目次として検出
+    if toc_start is not None:
+        for p in pages:
+            if p.page_index <= toc_start:
+                continue
+            if p.page_index > toc_start + 5:  # 最大5ページ先まで
+                break
+            if _looks_like_toc_page(p):
+                toc_indices.add(p.page_index)
+            else:
+                break  # TOC構造でなくなったら終了
+
     return toc_indices
+
+
+def _looks_like_toc_page(page):
+    """ページがTOC構造（短い行が多い）かどうかを判定"""
+    if not page.paragraphs:
+        return False
+    line_count = 0
+    short_line_count = 0
+    for para in page.paragraphs:
+        for line in para.lines:
+            line_count += 1
+            if len(line.text.strip()) < 40:
+                short_line_count += 1
+    if line_count == 0:
+        return False
+    # 短い行が60%以上 → TOCらしい構造
+    return short_line_count / line_count >= 0.6
 
 
 def _extract_title_hints(pages):
@@ -617,6 +656,78 @@ BIBLIO_SPLIT = re.compile(
 )
 
 
+# 目次エントリの構造化パターン
+TOC_CHAPTER_PATTERN = re.compile(
+    r'^(第\s*[\d１-９0-9一二三四五六七八九十]*\s*[章部編])\s*(.*)'
+)
+TOC_SPECIAL_SECTIONS = {
+    'はじめに', 'おわりに', 'あとがき', 'まえがき', 'はしがき',
+    'プロローグ', 'エピローグ', '序章', '終章', '序論', '結論',
+    '参考文献', '索引', '付録', '補論', '解説', '註', '注',
+}
+TOC_TRAILING_NUMBER = re.compile(r'[\s・.…‥ー一]+(\d{1,4})\s*$')
+
+
+def format_toc_entries(pages_paras):
+    """目次ページの段落群からMarkdownリスト形式のTOCを生成。
+
+    pages_paras: list of (paragraphs_for_one_page)
+    """
+    # 全TOCページの行を収集
+    raw_lines = []
+    for paras in pages_paras:
+        for para in paras:
+            for line in para.lines:
+                t = line.text.strip()
+                if t:
+                    raw_lines.append(t)
+
+    if not raw_lines:
+        return []
+
+    toc_label = {"目次", "もくじ", "CONTENTS", "Contents", "目　次"}
+    result = []
+    prev_was_chapter = False
+
+    for line in raw_lines:
+        # 目次ラベル自体はスキップ
+        if line in toc_label or (len(line) <= 10 and any(kw in line for kw in toc_label)):
+            continue
+
+        # 行末のページ番号を除去
+        cleaned = TOC_TRAILING_NUMBER.sub('', line).strip()
+        if not cleaned:
+            continue
+
+        # 章パターン（第N章 / 第N部 / 第N編）
+        m = TOC_CHAPTER_PATTERN.match(cleaned)
+        if m:
+            chapter_num = m.group(1)
+            chapter_title = m.group(2).strip()
+            if chapter_title:
+                result.append(f"- **{chapter_num}　{chapter_title}**")
+            else:
+                result.append(f"- **{chapter_num}**")
+            prev_was_chapter = True
+            continue
+
+        # 特殊セクション（はじめに、おわりに等）
+        is_special = False
+        for sec in TOC_SPECIAL_SECTIONS:
+            if cleaned.startswith(sec):
+                result.append(f"- {cleaned}")
+                is_special = True
+                prev_was_chapter = False
+                break
+        if is_special:
+            continue
+
+        # それ以外 → サブセクション（インデント付き）
+        result.append(f"  - {cleaned}")
+
+    return result
+
+
 def split_note_entries(paragraphs):
     """注釈ページの段落群を注釈エントリ単位に分割"""
     raw_lines = []
@@ -697,6 +808,10 @@ def convert_to_markdown(pages, running_headers, chapter_pages, note_page_indices
     toc_indices = toc_page_indices or set()
     TOC_LABEL = {"目次", "もくじ", "CONTENTS", "Contents"}
 
+    # === 目次ページを先に一括処理 ===
+    toc_paras_all = []  # 全TOCページの段落を収集
+    toc_output_done = False
+
     carry = ""  # 前ページからの未完結テキスト
     prev_was_notes = False
 
@@ -716,17 +831,17 @@ def convert_to_markdown(pages, running_headers, chapter_pages, note_page_indices
                 out.append(carry)
                 out.append("")
                 carry = ""
-            out.append("## 目次")
-            out.append("")
-            for para in filtered_paras:
-                if para.text.strip() in TOC_LABEL:
-                    continue
-                # 段落内の各行を個別に出力（目次エントリを1行ずつ表示）
-                for line in para.lines:
-                    t = line.text.strip()
-                    if t:
-                        out.append(t)
-            out.append("")
+            toc_paras_all.append(filtered_paras)
+            # 最後のTOCページの後にまとめて出力
+            next_is_toc = (pi + 1) in toc_indices
+            if not next_is_toc and not toc_output_done:
+                out.append("## 目次")
+                out.append("")
+                toc_lines = format_toc_entries(toc_paras_all)
+                for tl in toc_lines:
+                    out.append(tl)
+                out.append("")
+                toc_output_done = True
             continue
 
         # === 注釈ページ ===
