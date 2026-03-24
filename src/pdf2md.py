@@ -8,12 +8,13 @@ sys.setrecursionlimit(5000)
 import os
 import time
 import argparse
+import numpy as np
 from pathlib import Path
 from PIL import Image
 import pypdfium2 as pdfium
 
 from ocr2md import (
-    run_ocr_pipeline_images,
+    _ocr_single_page,
     parse_page_xml,
     detect_running_headers,
     detect_chapter_pages,
@@ -24,19 +25,22 @@ from ocr2md import (
 )
 
 
-def pdf_to_images(pdf_path, dpi=300):
-    """PDFの各ページをPIL Imageに変換する"""
+def pdf_page_count(pdf_path):
+    """PDFのページ数を返す"""
     pdf = pdfium.PdfDocument(pdf_path)
-    images = []
-    n_pages = len(pdf)
-    print(f"[INFO] PDF読み込み: {n_pages} ページ (DPI={dpi})")
-    for i in range(n_pages):
-        page = pdf[i]
-        bitmap = page.render(scale=dpi / 72)
-        pil_image = bitmap.to_pil()
-        images.append(pil_image)
+    n = len(pdf)
     pdf.close()
-    return images
+    return n
+
+
+def pdf_render_page(pdf_path, page_index, dpi=300):
+    """PDFの指定ページを1枚だけ画像として返す（メモリ節約）"""
+    pdf = pdfium.PdfDocument(pdf_path)
+    page = pdf[page_index]
+    bitmap = page.render(scale=dpi / 72)
+    pil_image = bitmap.to_pil().convert('RGB')
+    pdf.close()
+    return pil_image
 
 
 def main():
@@ -75,17 +79,36 @@ def main():
         print(f"PDFが見つかりません: {args.input}")
         return
 
-    # 1. PDF→画像変換
-    pil_images = pdf_to_images(args.input, dpi=args.dpi)
-    page_names = [f"page_{i+1:04d}" for i in range(len(pil_images))]
+    # 1. ページ数取得
+    n_pages = pdf_page_count(args.input)
+    print(f"[INFO] PDF: {n_pages} ページ (DPI={args.dpi})")
 
-    print(f"[INFO] {len(pil_images)} ページを処理します")
+    # 2. モデル初期化（1回だけ）
+    from ocr import get_detector, get_recognizer
+    detector = get_detector(args)
+    recognizer100 = get_recognizer(args=args)
+    recognizer30 = get_recognizer(args=args, weights_path=args.rec_weights30)
+    recognizer50 = get_recognizer(args=args, weights_path=args.rec_weights50)
 
-    # 2. OCR実行
-    xml_roots = run_ocr_pipeline_images(args, pil_images, page_names)
+    # 3. 1ページずつ PDF→画像→OCR→中間構造（メモリ節約）
+    pages = []
+    for i in range(n_pages):
+        name = f"page_{i+1:04d}"
+        print(f"[{i+1}/{n_pages}] {name}")
+        start = time.time()
 
-    # 3. XML→中間構造
-    pages = [parse_page_xml(root, i) for i, root in enumerate(xml_roots)]
+        pil_image = pdf_render_page(args.input, i, dpi=args.dpi)
+        img = np.array(pil_image)
+        del pil_image  # メモリ解放
+
+        root, nlines = _ocr_single_page(img, name, detector, recognizer30, recognizer50, recognizer100)
+        del img  # メモリ解放
+
+        elapsed = time.time() - start
+        print(f"  {nlines} lines, {elapsed:.1f}s")
+
+        pages.append(parse_page_xml(root, i))
+        del root  # メモリ解放
 
     # 4. 自動検出
     running_headers = detect_running_headers(pages)
