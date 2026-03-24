@@ -15,10 +15,11 @@ dependencies = { file = ["requirements.txt"] }
 
 [project.scripts]
 ndlocr-lite = "ocr:main"
+ndlocr-md = "ocr2md:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-py-modules = ["ocr", "deim", "parseq", "ndl_parser", "tablerecog"]
+py-modules = ["ocr", "ocr2md", "deim", "parseq", "ndl_parser", "tablerecog"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
