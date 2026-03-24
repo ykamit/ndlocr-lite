@@ -245,8 +245,17 @@ def parse_page_xml(root, page_index):
                 text = "".join(l.text for l in heading_lines)
                 pd.paragraphs.append(ParagraphData(lines=heading_lines, text=text, is_heading=True))
             if body_lines:
-                text = "".join(l.text for l in body_lines)
-                pd.paragraphs.append(ParagraphData(lines=body_lines, text=text, is_heading=False))
+                # 文末（。！？等）で段落を分割して認識精度を向上
+                para_group: list = []
+                for ld in body_lines:
+                    para_group.append(ld)
+                    if SENTENCE_END.search(ld.text):
+                        t = "".join(l.text for l in para_group)
+                        pd.paragraphs.append(ParagraphData(lines=para_group[:], text=t, is_heading=False))
+                        para_group = []
+                if para_group:
+                    t = "".join(l.text for l in para_group)
+                    pd.paragraphs.append(ParagraphData(lines=para_group, text=t, is_heading=False))
 
         elif tag == 'LINE':
             s = elem.get("STRING", "").strip()
@@ -292,32 +301,58 @@ def detect_chapter_pages(pages):
         heading_line_count = sum(len(hp.lines) for hp in heading_paras)
         body_line_count = sum(len(bp.lines) for bp in body_paras)
 
-        # 条件: 「第N章」「第N部」等のパターンを含み、タイトル本文LINEが複数ある
-        if CHAPTER_PATTERN.search(all_heading_text) and heading_line_count >= 2:
+        # 条件: 「第N章」「第N部」等のパターンを含む（heading_line_count >= 1で検出）
+        if CHAPTER_PATTERN.search(all_heading_text) and heading_line_count >= 1:
             title = "".join(hp.text for hp in heading_paras)
             chapters.append((p.page_index, title))
 
     return chapters
 
 
-def _extract_title_hint(pages):
-    """最初の数ページからタイトルのヒントを抽出"""
+def detect_toc_pages(pages):
+    """目次ページを自動検出"""
+    toc_indices = set()
+    toc_keywords = {"目次", "もくじ", "CONTENTS", "Contents"}
+    for p in pages:
+        for para in p.paragraphs:
+            if para.text.strip() in toc_keywords:
+                toc_indices.add(p.page_index)
+                break
+    return toc_indices
+
+
+def _extract_title_hints(pages):
+    """最初の数ページからタイトル候補リストを返す（優先度順）"""
     publisher_kw = ('ディスカヴァー', '講談社', '岩波', '新潮', '中公', '角川', '集英', '文春')
-    title_candidates = []
+    exclude_prefix = ('はじめに', 'おわりに', 'あとがき', 'まえがき', 'はしがき', 'プロローグ', 'エピローグ')
+    seen = []
     for p in pages[:5]:
         for para in p.paragraphs:
             if para.is_heading and 3 <= len(para.text) <= 60:
                 if any(kw in para.text for kw in publisher_kw):
                     continue
-                title_candidates.append(para.text)
-    if not title_candidates:
-        return None
-    counter = Counter(title_candidates)
+                if any(para.text.startswith(pfx) for pfx in exclude_prefix):
+                    continue
+                if para.text not in seen:
+                    seen.append(para.text)
+    counter = Counter()
+    for p in pages[:5]:
+        for para in p.paragraphs:
+            if para.is_heading and para.text in seen:
+                counter[para.text] += 1
+    # 複数回出現するものを先頭に、次に出現順
     repeated = [t for t, c in counter.most_common() if c >= 2]
-    return repeated[0] if repeated else max(title_candidates, key=len)
+    others = [t for t in seen if t not in repeated]
+    return repeated + others
 
 
-def _search_metadata_web(title_hint):
+def _extract_title_hint(pages):
+    """後方互換：候補の先頭を返す"""
+    hints = _extract_title_hints(pages)
+    return hints[0] if hints else None
+
+
+def _search_metadata_google(title_hint):
     """Google Books APIで書誌情報を取得。失敗時はNoneを返す"""
     try:
         import urllib.request
@@ -333,14 +368,14 @@ def _search_metadata_web(title_hint):
         if data.get("totalItems", 0) == 0:
             return None
 
-        # 最初の結果を使用
         vol = data["items"][0]["volumeInfo"]
         result = {}
         result["title"] = vol.get("title", "")
         if vol.get("subtitle"):
             result["title"] += " " + vol["subtitle"]
-        result["author"] = ", ".join(vol.get("authors", []))
-        result["publisher"] = vol.get("publisher")
+        authors = vol.get("authors", [])
+        result["author"] = ", ".join(authors) if authors else None
+        result["publisher"] = vol.get("publisher") or None
         result["year"] = vol.get("publishedDate", "")[:4] or None
         isbn_list = vol.get("industryIdentifiers", [])
         for isbn_info in isbn_list:
@@ -349,53 +384,178 @@ def _search_metadata_web(title_hint):
                 break
         return result
     except Exception as e:
-        print(f"[WARN] Web検索エラー: {e}")
+        print(f"[WARN] Google Books検索エラー: {e}")
         return None
 
 
+def _search_metadata_ndl(title_hint, author=None):
+    """国立国会図書館 OpenSearch APIで書誌情報を取得。失敗時はNoneを返す"""
+    try:
+        import urllib.request
+        import urllib.parse
+        import xml.etree.ElementTree as ET2
+
+        url = (f"https://iss.ndl.go.jp/api/opensearch?"
+               f"title={urllib.parse.quote(title_hint)}&mediatype=1&cnt=3")
+        if author:
+            url += f"&creator={urllib.parse.quote(author)}"
+        req = urllib.request.Request(url, headers={"User-Agent": "ndlocr-md/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            xml_data = resp.read().decode("utf-8")
+
+        root2 = ET2.fromstring(xml_data)
+        ns = {"dc": "http://purl.org/dc/elements/1.1/"}
+        channel = root2.find("channel")
+        if channel is None:
+            return None
+        item = channel.find("item")
+        if item is None:
+            return None
+
+        result = {}
+        t = item.find("dc:title", ns)
+        if t is not None and t.text:
+            result["title"] = t.text.split("/")[0].strip()
+        c = item.find("dc:creator", ns)
+        if c is not None and c.text:
+            result["author"] = c.text
+        p = item.find("dc:publisher", ns)
+        if p is not None and p.text:
+            result["publisher"] = p.text
+        d = item.find("dc:date", ns)
+        if d is not None and d.text:
+            m = re.search(r'(\d{4})', d.text)
+            if m:
+                result["year"] = m.group(1)
+        for id_elem in item.findall("dc:identifier", ns):
+            if id_elem.text:
+                isbn = re.sub(r'[^0-9X]', '', id_elem.text)
+                if len(isbn) == 13 and isbn.startswith("978"):
+                    result["isbn"] = isbn
+                    break
+        return result if result else None
+    except Exception as e:
+        print(f"[WARN] NDL検索エラー: {e}")
+        return None
+
+
+def _search_metadata_openbd(isbn):
+    """OpenBD APIでISBNから書誌情報を取得。失敗時はNoneを返す"""
+    try:
+        import urllib.request
+        import json
+
+        url = f"https://api.openbd.jp/v1/get?isbn={isbn}"
+        req = urllib.request.Request(url, headers={"User-Agent": "ndlocr-md/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        if not data or data[0] is None:
+            return None
+        summary = data[0].get("summary", {})
+        result = {}
+        if summary.get("title"):
+            result["title"] = summary["title"]
+        if summary.get("author"):
+            result["author"] = summary["author"]
+        if summary.get("publisher"):
+            result["publisher"] = summary["publisher"]
+        if summary.get("pubdate"):
+            m = re.search(r'(\d{4})', summary["pubdate"])
+            if m:
+                result["year"] = m.group(1)
+        if summary.get("isbn"):
+            result["isbn"] = summary["isbn"]
+        return result if result else None
+    except Exception as e:
+        print(f"[WARN] OpenBD検索エラー: {e}")
+        return None
+
+
+def _search_metadata_web(title_hint):
+    """後方互換エイリアス"""
+    return _search_metadata_google(title_hint)
+
+
+def _extract_isbn_from_ocr(pages):
+    """奥付ページからISBNを抽出"""
+    for p in pages[-10:]:
+        all_text = " ".join(para.text for para in p.paragraphs)
+        m = re.search(r'978[-\s]?\d[-\s]?\d{1,5}[-\s]?\d{1,7}[-\s]?\d{1,3}[-\s]?\d', all_text)
+        if m:
+            isbn = re.sub(r'[^0-9]', '', m.group(0))
+            if len(isbn) == 13:
+                return isbn
+        m = re.search(r'ISBN[:\s]*([0-9\-]{10,17})', all_text)
+        if m:
+            isbn = re.sub(r'[^0-9X]', '', m.group(1))
+            if len(isbn) in (10, 13):
+                return isbn
+    return None
+
+
 def infer_metadata(pages):
-    """OCRテキストからタイトルヒントを抽出し、Web検索で正確なメタデータを取得。
-    Web検索失敗時はOCRベストエフォートにフォールバック。"""
+    """OCRテキストからタイトルヒントを抽出し、複数のWeb APIで正確なメタデータを取得。"""
     result = {"title": None, "author": None, "publisher": None, "year": None, "isbn": None}
 
-    # 1. OCRからタイトルヒントを抽出
-    title_hint = _extract_title_hint(pages)
+    # 1. OCRからタイトル候補リストとISBNを抽出
+    title_hints = _extract_title_hints(pages)
+    isbn_hint = _extract_isbn_from_ocr(pages)
 
-    # 2. Google Books APIで正確なメタデータを取得
-    if title_hint:
-        print(f"[INFO] Google Books API検索中: {title_hint[:40]}...")
-        web = _search_metadata_web(title_hint)
-        if web:
-            result["title"] = web.get("title")
-            result["author"] = web.get("author")
-            result["publisher"] = web.get("publisher")
-            result["year"] = web.get("year")
-            result["isbn"] = web.get("isbn")
-            print(f"[INFO] 検索成功: {result['title'][:30] if result['title'] else '—'} / {result['author'] or '—'}")
-        else:
-            print(f"[INFO] 検索失敗、OCRから推測")
-            result["title"] = re.sub(
-                r'[（(][^）)]*(?:文庫|新書|叢書|選書)[^）)]*[）)]', '', title_hint
-            ).strip()
+    # 2. ISBNがあればOpenBDで直接取得（最も正確）
+    if isbn_hint:
+        print(f"[INFO] OpenBD検索中（ISBN: {isbn_hint}）...")
+        openbd = _search_metadata_openbd(isbn_hint)
+        if openbd:
+            result.update({k: v for k, v in openbd.items() if v})
+            print(f"[INFO] OpenBD成功: {result.get('title','—')[:30]} / {result.get('author','—')}")
 
-    # 3. 奥付（最後の5ページ）から出版年・出版社を補完
-    for p in pages[-5:]:
+    # 3. Google Books APIで補完（候補を順番に試す）
+    if not all([result.get('title'), result.get('author')]):
+        for hint in title_hints:
+            print(f"[INFO] Google Books API検索中: {hint[:40]}...")
+            google = _search_metadata_google(hint)
+            if google and (google.get('title') or google.get('author')):
+                for k in ['title', 'author', 'publisher', 'year', 'isbn']:
+                    if not result.get(k) and google.get(k):
+                        result[k] = google[k]
+                print(f"[INFO] Google Books成功: {result.get('title','—')[:30]} / {result.get('author','—')}")
+                break
+
+    # 4. NDL APIで不足情報を補完（publisher/yearが多い）
+    if not all([result.get('publisher'), result.get('year')]) and title_hints:
+        print(f"[INFO] NDL API検索中...")
+        ndl = _search_metadata_ndl(title_hints[0], result.get('author'))
+        if ndl:
+            for k in ['title', 'author', 'publisher', 'year', 'isbn']:
+                if not result.get(k) and ndl.get(k):
+                    result[k] = ndl[k]
+            print(f"[INFO] NDL成功: publisher={ndl.get('publisher','—')}, year={ndl.get('year','—')}")
+
+    # 5. それでも取得できない場合はOCRからフォールバック
+    if not result.get('title') and title_hints:
+        print(f"[INFO] Web検索失敗、OCRから推測")
+        result["title"] = re.sub(
+            r'[（(][^）)]*(?:文庫|新書|叢書|選書)[^）)]*[）)]', '', title_hints[0]
+        ).strip()
+
+    # 6. 奥付（最後の10ページ）から出版年・出版社を補完
+    for p in pages[-10:]:
         all_text = " ".join(para.text for para in p.paragraphs)
 
         if result["year"] is None:
-            m = re.search(r'(20\d{2})年.*(?:発行|刊行)', all_text)
+            m = re.search(r'(20\d{2})年.*?(?:発行|刊行|初版)', all_text)
             if m:
                 result["year"] = m.group(1)
             else:
-                m = re.search(r'(二〇[一二三四五六七八九〇]{2})年.*(?:発行|刊行)', all_text)
+                m = re.search(r'(二〇[一二三四五六七八九〇]{2})年.*?(?:発行|刊行|初版)', all_text)
                 if m:
                     result["year"] = m.group(1)
 
         if result["publisher"] is None:
-            # 「株式会社XX」パターン（住所のキーワードで切る）
             m = re.search(r'株式会社([\u4e00-\u9fff・ー]+?)(?:[〒\d東西南北都道府県市区町村]|$)', all_text)
             if m:
-                result["publisher"] = m.group(1)  # 「講談社」等の社名部分のみ
+                result["publisher"] = m.group(1)
 
     return result
 
@@ -474,7 +634,7 @@ def split_note_entries(paragraphs):
             entries.append(current)
             current = line
         else:
-            current += line
+            current += "\n" + line
     entries.append(current)
     return entries
 
@@ -502,7 +662,7 @@ def split_biblio_entries(paragraphs):
 # ---------------------------------------------------------------------------
 
 def convert_to_markdown(pages, running_headers, chapter_pages, note_page_indices,
-                        biblio_page_indices=None,
+                        biblio_page_indices=None, toc_page_indices=None,
                         metadata=None, no_frontmatter=False):
     """PageDataリストからMarkdown文字列を生成"""
     out = []
@@ -534,6 +694,8 @@ def convert_to_markdown(pages, running_headers, chapter_pages, note_page_indices
 
     chapter_indices = {idx for idx, _ in chapter_pages}
     chapter_map = {idx: t for idx, t in chapter_pages}
+    toc_indices = toc_page_indices or set()
+    TOC_LABEL = {"目次", "もくじ", "CONTENTS", "Contents"}
 
     carry = ""  # 前ページからの未完結テキスト
     prev_was_notes = False
@@ -547,6 +709,25 @@ def convert_to_markdown(pages, running_headers, chapter_pages, note_page_indices
             if para.text[:60] in running_headers:
                 continue
             filtered_paras.append(para)
+
+        # === 目次ページ ===
+        if pi in toc_indices:
+            if carry:
+                out.append(carry)
+                out.append("")
+                carry = ""
+            out.append("## 目次")
+            out.append("")
+            for para in filtered_paras:
+                if para.text.strip() in TOC_LABEL:
+                    continue
+                # 段落内の各行を個別に出力（目次エントリを1行ずつ表示）
+                for line in para.lines:
+                    t = line.text.strip()
+                    if t:
+                        out.append(t)
+            out.append("")
+            continue
 
         # === 注釈ページ ===
         if pi in note_page_indices:
@@ -622,7 +803,11 @@ def convert_to_markdown(pages, running_headers, chapter_pages, note_page_indices
                 continue
 
             if is_heading:
-                out.append("## " + text)
+                # 第N章/部/編 → # (章レベル), それ以外 → ## (節レベル)
+                if CHAPTER_PATTERN.search(text):
+                    out.append("# " + text)
+                else:
+                    out.append("## " + text)
             else:
                 out.append(text)
             out.append("")
@@ -700,6 +885,7 @@ def main():
     chapter_pages = detect_chapter_pages(pages)
     note_indices = detect_note_pages(pages)
     biblio_indices = detect_biblio_pages(pages)
+    toc_indices = detect_toc_pages(pages)
 
     print(f"[INFO] ランニングヘッダ: {len(running_headers)}件検出")
     print(f"[INFO] 章タイトル: {len(chapter_pages)}件検出")
@@ -707,6 +893,7 @@ def main():
         print(f"  p{idx+1:03d}: {title[:40]}")
     print(f"[INFO] 注釈ページ: {len(note_indices)}件検出")
     print(f"[INFO] 参考文献ページ: {len(biblio_indices)}件検出")
+    print(f"[INFO] 目次ページ: {len(toc_indices)}件検出")
 
     # 4. メタデータ推測（CLI未指定のフィールドを補完）
     inferred = infer_metadata(pages)
@@ -727,12 +914,26 @@ def main():
     md = convert_to_markdown(
         pages, running_headers, chapter_pages, note_indices,
         biblio_page_indices=biblio_indices,
+        toc_page_indices=toc_indices,
         metadata=metadata,
         no_frontmatter=args.no_frontmatter,
     )
 
-    # 5. 出力
-    with open(args.output, 'w', encoding='utf-8') as f:
+    # 5. 出力（既存ファイルは _OLD に退避）
+    output_path = Path(args.output)
+    if output_path.exists():
+        old_path = output_path.with_stem(output_path.stem + "_OLD")
+        if old_path.exists():
+            i = 2
+            while True:
+                old_path = output_path.with_stem(output_path.stem + f"_OLD{i}")
+                if not old_path.exists():
+                    break
+                i += 1
+        output_path.rename(old_path)
+        print(f"[INFO] 既存ファイルを退避: {old_path.name}")
+
+    with open(output_path, 'w', encoding='utf-8') as f:
         f.write(md)
 
     print(f"[INFO] 出力完了: {args.output} ({len(md)} 文字)")

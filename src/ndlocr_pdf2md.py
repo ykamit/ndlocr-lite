@@ -13,13 +13,14 @@ from pathlib import Path
 from PIL import Image
 import pypdfium2 as pdfium
 
-from ocr2md import (
+from ndlocr_ocr2md import (
     _ocr_single_page,
     parse_page_xml,
     detect_running_headers,
     detect_chapter_pages,
     detect_note_pages,
     detect_biblio_pages,
+    detect_toc_pages,
     infer_metadata,
     convert_to_markdown,
 )
@@ -115,6 +116,7 @@ def main():
     chapter_pages = detect_chapter_pages(pages)
     note_indices = detect_note_pages(pages)
     biblio_indices = detect_biblio_pages(pages)
+    toc_indices = detect_toc_pages(pages)
 
     print(f"[INFO] ランニングヘッダ: {len(running_headers)}件検出")
     print(f"[INFO] 章タイトル: {len(chapter_pages)}件検出")
@@ -122,6 +124,7 @@ def main():
         print(f"  p{idx+1:03d}: {title[:40]}")
     print(f"[INFO] 注釈ページ: {len(note_indices)}件検出")
     print(f"[INFO] 参考文献ページ: {len(biblio_indices)}件検出")
+    print(f"[INFO] 目次ページ: {len(toc_indices)}件検出")
 
     # 5. メタデータ推測（CLI未指定のフィールドを補完）
     inferred = infer_metadata(pages)
@@ -142,12 +145,27 @@ def main():
     md = convert_to_markdown(
         pages, running_headers, chapter_pages, note_indices,
         biblio_page_indices=biblio_indices,
+        toc_page_indices=toc_indices,
         metadata=metadata,
         no_frontmatter=args.no_frontmatter,
     )
 
-    # 6. 出力
-    with open(args.output, 'w', encoding='utf-8') as f:
+    # 6. 出力（既存ファイルは _OLD に退避）
+    output_path = Path(args.output)
+    if output_path.exists():
+        old_path = output_path.with_stem(output_path.stem + "_OLD")
+        # _OLD がすでに存在する場合は番号を付けて退避
+        if old_path.exists():
+            i = 2
+            while True:
+                old_path = output_path.with_stem(output_path.stem + f"_OLD{i}")
+                if not old_path.exists():
+                    break
+                i += 1
+        output_path.rename(old_path)
+        print(f"[INFO] 既存ファイルを退避: {old_path.name}")
+
+    with open(output_path, 'w', encoding='utf-8') as f:
         f.write(md)
 
     print(f"[INFO] 出力完了: {args.output} ({len(md)} 文字)")
