@@ -300,6 +300,106 @@ def detect_chapter_pages(pages):
     return chapters
 
 
+def _extract_title_hint(pages):
+    """最初の数ページからタイトルのヒントを抽出"""
+    publisher_kw = ('ディスカヴァー', '講談社', '岩波', '新潮', '中公', '角川', '集英', '文春')
+    title_candidates = []
+    for p in pages[:5]:
+        for para in p.paragraphs:
+            if para.is_heading and 3 <= len(para.text) <= 60:
+                if any(kw in para.text for kw in publisher_kw):
+                    continue
+                title_candidates.append(para.text)
+    if not title_candidates:
+        return None
+    counter = Counter(title_candidates)
+    repeated = [t for t, c in counter.most_common() if c >= 2]
+    return repeated[0] if repeated else max(title_candidates, key=len)
+
+
+def _search_metadata_web(title_hint):
+    """Google Books APIで書誌情報を取得。失敗時はNoneを返す"""
+    try:
+        import urllib.request
+        import urllib.parse
+        import json
+
+        query = urllib.parse.quote(title_hint)
+        url = f"https://www.googleapis.com/books/v1/volumes?q=intitle:{query}&langRestrict=ja&maxResults=3"
+        req = urllib.request.Request(url, headers={"User-Agent": "ndlocr-md/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        if data.get("totalItems", 0) == 0:
+            return None
+
+        # 最初の結果を使用
+        vol = data["items"][0]["volumeInfo"]
+        result = {}
+        result["title"] = vol.get("title", "")
+        if vol.get("subtitle"):
+            result["title"] += " " + vol["subtitle"]
+        result["author"] = ", ".join(vol.get("authors", []))
+        result["publisher"] = vol.get("publisher")
+        result["year"] = vol.get("publishedDate", "")[:4] or None
+        isbn_list = vol.get("industryIdentifiers", [])
+        for isbn_info in isbn_list:
+            if isbn_info.get("type") == "ISBN_13":
+                result["isbn"] = isbn_info["identifier"]
+                break
+        return result
+    except Exception as e:
+        print(f"[WARN] Web検索エラー: {e}")
+        return None
+
+
+def infer_metadata(pages):
+    """OCRテキストからタイトルヒントを抽出し、Web検索で正確なメタデータを取得。
+    Web検索失敗時はOCRベストエフォートにフォールバック。"""
+    result = {"title": None, "author": None, "publisher": None, "year": None, "isbn": None}
+
+    # 1. OCRからタイトルヒントを抽出
+    title_hint = _extract_title_hint(pages)
+
+    # 2. Google Books APIで正確なメタデータを取得
+    if title_hint:
+        print(f"[INFO] Google Books API検索中: {title_hint[:40]}...")
+        web = _search_metadata_web(title_hint)
+        if web:
+            result["title"] = web.get("title")
+            result["author"] = web.get("author")
+            result["publisher"] = web.get("publisher")
+            result["year"] = web.get("year")
+            result["isbn"] = web.get("isbn")
+            print(f"[INFO] 検索成功: {result['title'][:30] if result['title'] else '—'} / {result['author'] or '—'}")
+        else:
+            print(f"[INFO] 検索失敗、OCRから推測")
+            result["title"] = re.sub(
+                r'[（(][^）)]*(?:文庫|新書|叢書|選書)[^）)]*[）)]', '', title_hint
+            ).strip()
+
+    # 3. 奥付（最後の5ページ）から出版年・出版社を補完
+    for p in pages[-5:]:
+        all_text = " ".join(para.text for para in p.paragraphs)
+
+        if result["year"] is None:
+            m = re.search(r'(20\d{2})年.*(?:発行|刊行)', all_text)
+            if m:
+                result["year"] = m.group(1)
+            else:
+                m = re.search(r'(二〇[一二三四五六七八九〇]{2})年.*(?:発行|刊行)', all_text)
+                if m:
+                    result["year"] = m.group(1)
+
+        if result["publisher"] is None:
+            # 「株式会社XX」パターン（住所のキーワードで切る）
+            m = re.search(r'株式会社([\u4e00-\u9fff・ー]+?)(?:[〒\d東西南北都道府県市区町村]|$)', all_text)
+            if m:
+                result["publisher"] = m.group(1)  # 「講談社」等の社名部分のみ
+
+    return result
+
+
 def detect_note_pages(pages):
     """注釈ページを自動検出"""
     note_indices = set()
@@ -608,16 +708,22 @@ def main():
     print(f"[INFO] 注釈ページ: {len(note_indices)}件検出")
     print(f"[INFO] 参考文献ページ: {len(biblio_indices)}件検出")
 
-    # 4. Markdown変換
+    # 4. メタデータ推測（CLI未指定のフィールドを補完）
+    inferred = infer_metadata(pages)
     metadata = {
-        "title": args.title,
-        "author": args.author,
-        "year": args.year,
-        "publisher": args.publisher,
-        "isbn": args.isbn,
+        "title": args.title or inferred.get("title"),
+        "author": args.author or inferred.get("author"),
+        "year": args.year or inferred.get("year"),
+        "publisher": args.publisher or inferred.get("publisher"),
+        "isbn": args.isbn or inferred.get("isbn"),
         "type": args.type,
         "tags": args.tags,
     }
+    if inferred.get("title") or inferred.get("author"):
+        print(f"[INFO] メタデータ推測: title={inferred.get('title', '—')[:30]}, "
+              f"author={inferred.get('author', '—')}, "
+              f"publisher={inferred.get('publisher', '—')}, "
+              f"year={inferred.get('year', '—')}")
     md = convert_to_markdown(
         pages, running_headers, chapter_pages, note_indices,
         biblio_page_indices=biblio_indices,

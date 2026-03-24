@@ -19,6 +19,7 @@ from ocr2md import (
     detect_chapter_pages,
     detect_note_pages,
     detect_biblio_pages,
+    infer_metadata,
     convert_to_markdown,
 )
 
@@ -99,16 +100,22 @@ def main():
     print(f"[INFO] 注釈ページ: {len(note_indices)}件検出")
     print(f"[INFO] 参考文献ページ: {len(biblio_indices)}件検出")
 
-    # 5. Markdown変換
+    # 5. メタデータ推測（CLI未指定のフィールドを補完）
+    inferred = infer_metadata(pages)
     metadata = {
-        "title": args.title,
-        "author": args.author,
-        "year": args.year,
-        "publisher": args.publisher,
-        "isbn": args.isbn,
+        "title": args.title or inferred.get("title"),
+        "author": args.author or inferred.get("author"),
+        "year": args.year or inferred.get("year"),
+        "publisher": args.publisher or inferred.get("publisher"),
+        "isbn": args.isbn or inferred.get("isbn"),
         "type": args.type,
         "tags": args.tags,
     }
+    if inferred.get("title") or inferred.get("author"):
+        print(f"[INFO] メタデータ推測: title={inferred.get('title', '—')[:30]}, "
+              f"author={inferred.get('author', '—')}, "
+              f"publisher={inferred.get('publisher', '—')}, "
+              f"year={inferred.get('year', '—')}")
     md = convert_to_markdown(
         pages, running_headers, chapter_pages, note_indices,
         biblio_page_indices=biblio_indices,
