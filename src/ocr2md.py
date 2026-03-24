@@ -377,17 +377,36 @@ def split_biblio_entries(paragraphs):
 
 def convert_to_markdown(pages, running_headers, chapter_pages, note_page_indices,
                         biblio_page_indices=None,
-                        title=None, author=None, no_frontmatter=False):
+                        metadata=None, no_frontmatter=False):
     """PageDataリストからMarkdown文字列を生成"""
     out = []
+    meta = metadata or {}
 
-    # YAML frontmatter
+    # YAML frontmatter（Obsidian互換）
     if not no_frontmatter:
         out.append("---")
-        if title:
-            out.append(f"title: \"{title}\"")
-        if author:
-            out.append(f"author: \"{author}\"")
+        if meta.get("title"):
+            out.append(f"title: \"{meta['title']}\"")
+        if meta.get("author"):
+            out.append(f"author: \"{meta['author']}\"")
+        if meta.get("year"):
+            out.append(f"year: {meta['year']}")
+        if meta.get("publisher"):
+            out.append(f"publisher: \"{meta['publisher']}\"")
+        if meta.get("isbn"):
+            out.append(f"isbn: \"{meta['isbn']}\"")
+        source_type = meta.get("type", "book")
+        out.append(f"type: {source_type}")
+        out.append(f"pages: {len(pages)}")
+        out.append(f"date_created: \"{__import__('datetime').date.today().isoformat()}\"")
+        if meta.get("tags"):
+            out.append("tags:")
+            for tag in meta["tags"]:
+                out.append(f"  - {tag}")
+        if meta.get("keywords"):
+            out.append("keywords:")
+            for kw in meta["keywords"]:
+                out.append(f"  - \"{kw}\"")
         out.append("---")
         out.append("")
 
@@ -507,9 +526,15 @@ def main():
     parser.add_argument("--sourcedir", type=str, help="Path to image directory")
     parser.add_argument("--sourceimg", type=str, help="Path to single image file")
     parser.add_argument("--output", type=str, required=True, help="Output Markdown file path (.md)")
-    parser.add_argument("--title", type=str, help="Book title for YAML frontmatter")
-    parser.add_argument("--author", type=str, help="Author name for YAML frontmatter")
-    parser.add_argument("--no-frontmatter", action="store_true", help="Skip YAML frontmatter")
+    parser.add_argument("--title", type=str, help="書籍タイトル")
+    parser.add_argument("--author", type=str, help="著者名")
+    parser.add_argument("--year", type=str, help="出版年")
+    parser.add_argument("--publisher", type=str, help="出版社")
+    parser.add_argument("--isbn", type=str, help="ISBN")
+    parser.add_argument("--tags", type=str, nargs="*", help="タグ（複数指定可）")
+    parser.add_argument("--keywords", type=str, nargs="*", help="キーワード（複数指定可）")
+    parser.add_argument("--type", type=str, default="book", help="資料種別 (book, article, etc.)")
+    parser.add_argument("--no-frontmatter", action="store_true", help="YAML frontmatter を出力しない")
 
     # OCRエンジン引数（既存と同じ）
     parser.add_argument("--det-weights", type=str, default=str(base_dir / "model" / "deim-s-1024x1024.onnx"))
@@ -563,10 +588,20 @@ def main():
     print(f"[INFO] 参考文献ページ: {len(biblio_indices)}件検出")
 
     # 4. Markdown変換
+    metadata = {
+        "title": args.title,
+        "author": args.author,
+        "year": args.year,
+        "publisher": args.publisher,
+        "isbn": args.isbn,
+        "type": args.type,
+        "tags": args.tags,
+        "keywords": args.keywords,
+    }
     md = convert_to_markdown(
         pages, running_headers, chapter_pages, note_indices,
         biblio_page_indices=biblio_indices,
-        title=args.title, author=args.author,
+        metadata=metadata,
         no_frontmatter=args.no_frontmatter,
     )
 
