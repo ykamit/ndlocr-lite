@@ -84,8 +84,77 @@ IMAGE_EXTENSIONS = {"jpg", "png", "tiff", "jp2", "tif", "jpeg", "bmp"}
 # OCRパイプライン（既存エンジン再利用）
 # ---------------------------------------------------------------------------
 
+def _ocr_single_page(img, imgname, detector, recognizer30, recognizer50, recognizer100):
+    """1ページ分のOCR処理。numpy配列を受け取り、XML root要素を返す"""
+    img_h, img_w = img.shape[:2]
+
+    detections, classeslist = process_detector(
+        detector, inputname=imgname, npimage=img,
+        outputpath="", issaveimg=False
+    )
+
+    resultobj = [dict(), dict()]
+    resultobj[0][0] = list()
+    for j in range(17):
+        resultobj[1][j] = []
+    for det in detections:
+        xmin, ymin, xmax, ymax = det["box"]
+        conf = det["confidence"]
+        char_count = det["pred_char_count"]
+        if det["class_index"] == 0:
+            resultobj[0][0].append([xmin, ymin, xmax, ymax])
+        resultobj[1][det["class_index"]].append([xmin, ymin, xmax, ymax, conf, char_count])
+
+    xmlstr = convert_to_xml_string3(img_w, img_h, imgname, classeslist, resultobj)
+    xmlstr = "<OCRDATASET>" + xmlstr + "</OCRDATASET>"
+    root = ET.fromstring(xmlstr)
+    eval_xml(root, logger=None)
+
+    alllineobj = []
+    for idx, lineobj in enumerate(root.findall(".//LINE")):
+        xmin = int(lineobj.get("X"))
+        ymin = int(lineobj.get("Y"))
+        line_w = int(lineobj.get("WIDTH"))
+        line_h = int(lineobj.get("HEIGHT"))
+        try:
+            pred_char_cnt = float(lineobj.get("PRED_CHAR_CNT"))
+        except:
+            pred_char_cnt = 100.0
+        lineimg = img[ymin:ymin+line_h, xmin:xmin+line_w, :]
+        alllineobj.append(RecogLine(lineimg, idx, pred_char_cnt))
+
+    if len(alllineobj) == 0 and len(detections) > 0:
+        page = root.find("PAGE")
+        for idx, det in enumerate(detections):
+            xmin, ymin, xmax, ymax = det["box"]
+            line_w = int(xmax - xmin)
+            line_h = int(ymax - ymin)
+            if line_w > 0 and line_h > 0:
+                line_elem = ET.SubElement(page, "LINE")
+                line_elem.set("TYPE", "本文")
+                line_elem.set("X", str(int(xmin)))
+                line_elem.set("Y", str(int(ymin)))
+                line_elem.set("WIDTH", str(line_w))
+                line_elem.set("HEIGHT", str(line_h))
+                line_elem.set("CONF", f"{det['confidence']:0.3f}")
+                pred_char_cnt = det.get("pred_char_count", 100.0)
+                line_elem.set("PRED_CHAR_CNT", f"{pred_char_cnt:0.3f}")
+                lineimg = img[int(ymin):int(ymax), int(xmin):int(xmax), :]
+                alllineobj.append(RecogLine(lineimg, idx, pred_char_cnt))
+
+    resultlinesall = process_cascade(
+        alllineobj, recognizer30, recognizer50, recognizer100, is_cascade=True
+    )
+
+    for idx, lineobj in enumerate(root.findall(".//LINE")):
+        if idx < len(resultlinesall):
+            lineobj.set("STRING", resultlinesall[idx])
+
+    return root, len(resultlinesall)
+
+
 def run_ocr_pipeline(args, image_paths):
-    """画像リストにOCRを実行し、各ページのXML root要素リストを返す"""
+    """画像ファイルリストにOCRを実行し、各ページのXML root要素リストを返す"""
     detector = get_detector(args)
     recognizer100 = get_recognizer(args=args)
     recognizer30 = get_recognizer(args=args, weights_path=args.rec_weights30)
@@ -98,77 +167,34 @@ def run_ocr_pipeline(args, image_paths):
         pil_image = Image.open(inputpath).convert('RGB')
         img = np.array(pil_image)
         imgname = os.path.basename(inputpath)
-        img_h, img_w = img.shape[:2]
 
-        # 検出
-        detections, classeslist = process_detector(
-            detector, inputname=imgname, npimage=img,
-            outputpath="", issaveimg=False
-        )
-
-        # 検出結果→XML構造
-        resultobj = [dict(), dict()]
-        resultobj[0][0] = list()
-        for j in range(17):
-            resultobj[1][j] = []
-        for det in detections:
-            xmin, ymin, xmax, ymax = det["box"]
-            conf = det["confidence"]
-            char_count = det["pred_char_count"]
-            if det["class_index"] == 0:
-                resultobj[0][0].append([xmin, ymin, xmax, ymax])
-            resultobj[1][det["class_index"]].append([xmin, ymin, xmax, ymax, conf, char_count])
-
-        xmlstr = convert_to_xml_string3(img_w, img_h, imgname, classeslist, resultobj)
-        xmlstr = "<OCRDATASET>" + xmlstr + "</OCRDATASET>"
-        root = ET.fromstring(xmlstr)
-        eval_xml(root, logger=None)
-
-        # LINE画像切り出し＋認識
-        alllineobj = []
-        for idx, lineobj in enumerate(root.findall(".//LINE")):
-            xmin = int(lineobj.get("X"))
-            ymin = int(lineobj.get("Y"))
-            line_w = int(lineobj.get("WIDTH"))
-            line_h = int(lineobj.get("HEIGHT"))
-            try:
-                pred_char_cnt = float(lineobj.get("PRED_CHAR_CNT"))
-            except:
-                pred_char_cnt = 100.0
-            lineimg = img[ymin:ymin+line_h, xmin:xmin+line_w, :]
-            alllineobj.append(RecogLine(lineimg, idx, pred_char_cnt))
-
-        if len(alllineobj) == 0 and len(detections) > 0:
-            page = root.find("PAGE")
-            for idx, det in enumerate(detections):
-                xmin, ymin, xmax, ymax = det["box"]
-                line_w = int(xmax - xmin)
-                line_h = int(ymax - ymin)
-                if line_w > 0 and line_h > 0:
-                    line_elem = ET.SubElement(page, "LINE")
-                    line_elem.set("TYPE", "本文")
-                    line_elem.set("X", str(int(xmin)))
-                    line_elem.set("Y", str(int(ymin)))
-                    line_elem.set("WIDTH", str(line_w))
-                    line_elem.set("HEIGHT", str(line_h))
-                    line_elem.set("CONF", f"{det['confidence']:0.3f}")
-                    pred_char_cnt = det.get("pred_char_count", 100.0)
-                    line_elem.set("PRED_CHAR_CNT", f"{pred_char_cnt:0.3f}")
-                    lineimg = img[int(ymin):int(ymax), int(xmin):int(xmax), :]
-                    alllineobj.append(RecogLine(lineimg, idx, pred_char_cnt))
-
-        # 文字認識
-        resultlinesall = process_cascade(
-            alllineobj, recognizer30, recognizer50, recognizer100, is_cascade=True
-        )
-
-        # STRING属性をセット
-        for idx, lineobj in enumerate(root.findall(".//LINE")):
-            if idx < len(resultlinesall):
-                lineobj.set("STRING", resultlinesall[idx])
+        root, nlines = _ocr_single_page(img, imgname, detector, recognizer30, recognizer50, recognizer100)
 
         elapsed = time.time() - start
-        print(f"  {len(resultlinesall)} lines, {elapsed:.1f}s")
+        print(f"  {nlines} lines, {elapsed:.1f}s")
+        results.append(root)
+
+    return results
+
+
+def run_ocr_pipeline_images(args, pil_images, page_names=None):
+    """PIL Imageリストに直接OCRを実行し、各ページのXML root要素リストを返す"""
+    detector = get_detector(args)
+    recognizer100 = get_recognizer(args=args)
+    recognizer30 = get_recognizer(args=args, weights_path=args.rec_weights30)
+    recognizer50 = get_recognizer(args=args, weights_path=args.rec_weights50)
+
+    results = []
+    for i, pil_image in enumerate(pil_images):
+        name = page_names[i] if page_names else f"page_{i+1:04d}"
+        print(f"[{i+1}/{len(pil_images)}] {name}")
+        start = time.time()
+        img = np.array(pil_image.convert('RGB'))
+
+        root, nlines = _ocr_single_page(img, name, detector, recognizer30, recognizer50, recognizer100)
+
+        elapsed = time.time() - start
+        print(f"  {nlines} lines, {elapsed:.1f}s")
         results.append(root)
 
     return results
